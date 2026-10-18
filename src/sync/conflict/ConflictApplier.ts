@@ -21,6 +21,7 @@ import { isAnomalousRemoteContent } from '../../util/limits';
 import { FileLogger } from '../../util/FileLogger';
 import { sha256 } from '../../util/hash';
 import { bytesEqual, checksumProvesIdentical, convergedState } from '../identity/contentIdentity';
+import { reconcileFileTimes } from '../identity/fileTimes';
 import type { App } from 'obsidian';
 
 export interface Connection {
@@ -65,7 +66,7 @@ export class ConflictApplier {
 
     // Must precede any merge write: feeds the max(local, remote) mtime stamp and the size/mtime strategies.
     const localStatBefore = await this.deps.localAdapter.stat(path);
-    const identity = await this.convergeIfIdentical(conn, path, remote, localStatBefore);
+    const identity = await this.convergeIfIdentical(conn, path, remote, localStatBefore, base);
     if (identity.converged) return;
     this.deps.onConflictEncountered();
     const localMtimeBefore = localStatBefore?.mtime ?? 0;
@@ -144,6 +145,7 @@ export class ConflictApplier {
   private async convergeIfIdentical(
     conn: Connection, path: string, remote: RemoteFileInfo,
     localStat: { size: number; mtime: number } | null,
+    base?: FileState,
   ): Promise<{ converged: boolean; remoteData?: ArrayBuffer }> {
     if (!localStat) return { converged: false };
     const localData = await this.deps.localAdapter.readBinary(path);
@@ -157,6 +159,9 @@ export class ConflictApplier {
       identical = bytesEqual(localData, remoteData);
     }
     if (!identical) return { converged: false, remoteData };
+    // First-sync large files and listings without checksums reach this identity path rather than
+    // SyncEngine's checksum fast path. Reconcile before committing a new timestamp baseline.
+    await reconcileFileTimes(this.deps.localAdapter, conn.client, remote, base);
     this.deps.stateDB.setFile(await withLocalSignature(
       this.deps.localAdapter, convergedState(remote, localHash, localStat), remote.lastModified,
     ));
