@@ -1,3 +1,4 @@
+import { reconcileFileTimes } from './identity/fileTimes';
 import { App, Notice, Platform } from 'obsidian';
 import {
   DavSyncSettings,
@@ -792,7 +793,7 @@ export class SyncEngine {
 
   // The decision (including the safety-window guard) lives in ./policy; clock and last-sync time are accessors so StateDB
   // is consulted only when needed.
-  private isLocallyUnchanged(base: FileState, stat: { mtime: number; size: number }): boolean {
+  private isLocallyUnchanged(base: FileState, stat: { mtime: number; size: number; ctime?: number }): boolean {
     return isLocallyUnchangedPure(base, stat, {
       now: () => Date.now(),
       lastSyncTime: () => this.opts.stateDB.getLastSyncTime(),
@@ -881,6 +882,7 @@ export class SyncEngine {
     if (localStat && (remoteChanged || localChanged)
         && localStat.size === remote.size && checksumProvesIdentical(remote, localHash)) {
       void this.opts.logger?.log(`sync: content identical to the remote (checksum) → state converged, no transfer → ${remote.path}`);
+      await reconcileFileTimes(this.opts.localAdapter, this.client!, remote, base);
       this.opts.stateDB.setFile(await this.withLocalSignature(convergedState(remote, localHash, localStat), remote.lastModified));
       return;
     }
@@ -895,9 +897,17 @@ export class SyncEngine {
         await this.handleConflict(remote.path, base, remote, remoteId, idType, summary);
         return;
       }
+      if (localStat) {
+        const changed = await reconcileFileTimes(this.opts.localAdapter, this.client!, remote, base);
+        if (changed || base?.remoteFileId !== remote.fileId
+            || (localStat.ctime != null && remote.creationTime != null && (base?.localCtime == null || base.remoteCtime == null))) {
+          this.opts.stateDB.setFile(await this.withLocalSignature(convergedState(remote, localHash, localStat), remote.lastModified));
+        }
+      }
       // Converged: clear a stale conflict flag so the conflict count does not stay stuck.
       if (base?.isConflicted) {
-        this.opts.stateDB.setFile({ ...base, isConflicted: false });
+        const converged = this.opts.stateDB.getFile(remote.path);
+        if (converged) this.opts.stateDB.setFile({ ...converged, isConflicted: false });
       }
       return;
     }
@@ -1053,7 +1063,13 @@ export class SyncEngine {
         const base = this.opts.stateDB.getFile(path);
         const data = await this.opts.localAdapter.readBinary(path);
         const localHash = await sha256(data);
-        if (base && localHash === base.localHash) return;
+        if (base && localHash === base.localHash) {
+          if (base.localCtime != null && this.client) {
+            const remote = await this.client.statFile(path);
+            if (remote) await this.processRemoteFile(remote, summary);
+          }
+          return;
+        }
         // For new files, use the local hash as remoteId (= the server checksum after upload).
         const remoteId = base?.remoteId ?? localHash;
         const idType: FileState['idType'] = base?.idType ?? 'sha256';
@@ -1219,7 +1235,7 @@ export class SyncEngine {
           const data = await this.opts.localAdapter.readBinary(path);
           // Hash from the bytes just read; reused for the OC-Checksum upload header so the client does not hash twice.
           const localHash = await sha256(data);
-          const outcome = await this.uploadStrategy!.upload(this.client!, path, data, lf.mtime, { precomputedSha256: localHash });
+          const outcome = await this.uploadStrategy!.upload(this.client!, path, data, lf.mtime, { precomputedSha256: localHash, ctime: (await this.opts.localAdapter.stat(path))?.ctime });
           if (outcome === 'skipped') { this.tickProgress(); return; }
           summary.uploadedCount++;
           this.recordHistory(path, 'uploaded');
@@ -1255,13 +1271,11 @@ export class SyncEngine {
       const remote = remoteMap.get(path);
       if (!lf || !remote) continue;
       const mtime = remote.lastModified || lf.mtime;
-      if (remote.lastModified) {
-        await this.opts.localAdapter.setMtime(path, remote.lastModified);
-      }
+      await reconcileFileTimes(this.opts.localAdapter, this.client!, remote);
       // Classified unchanged only after localHash === remote.checksum, so the checksum is the content hash for both sides.
       this.opts.stateDB.setFile(await this.withLocalSignature({
         path, localHash: remote.checksum!, remoteId: remote.checksum!, idType: 'sha256',
-        size: lf.size, mtime, remoteFileId: remote.fileId, isConflicted: false,
+        size: lf.size, mtime, remoteFileId: remote.fileId, isConflicted: false, remoteCtime: remote.creationTime,
       }, remote.lastModified));
     }
 

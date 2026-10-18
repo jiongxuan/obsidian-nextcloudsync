@@ -183,7 +183,7 @@ export class ConflictApplier {
     try {
       const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
       try {
-        const outcome = await conn.uploadStrategy.upload(conn.client, path, mergedData, maxMtime);
+        const outcome = await conn.uploadStrategy.upload(conn.client, path, mergedData, maxMtime, { ctime: (await this.deps.localAdapter.stat(path))?.ctime ?? remote.creationTime });
         if (outcome !== 'skipped') { summary.uploadedCount++; uploaded = true; this.deps.journal.recordHistory(path, 'uploaded'); }
       } finally {
         await this.deps.transfer.releaseLock(conn.client, path, lockToken);
@@ -212,7 +212,7 @@ export class ConflictApplier {
     // After a failed push localHash deliberately differs from the file; a signature would let the
     // local-unchanged fast path skip the re-hash that drives the retry.
     this.deps.stateDB.setFile(
-      uploaded ? await withLocalSignature(this.deps.localAdapter, nextState, remote.lastModified) : nextState,
+      uploaded ? await withLocalSignature(this.deps.localAdapter, nextState, maxMtime) : nextState,
     );
     const mergeDetail: SyncHistoryDetail = {
       localHash: mergedHash,
@@ -243,7 +243,7 @@ export class ConflictApplier {
     try {
       const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
       try {
-        const outcome = await conn.uploadStrategy.upload(conn.client, path, localData, mtime);
+        const outcome = await conn.uploadStrategy.upload(conn.client, path, localData, mtime, { ctime: stat?.ctime });
         if (outcome === 'skipped') {
           // Skipped (e.g. size limit): leave the conflict unresolved.
           this.deps.queueRetry(path);
@@ -270,7 +270,7 @@ export class ConflictApplier {
       path, localHash, remoteId: localHash, idType: 'sha256',
       size: stat?.size ?? localData.byteLength, mtime,
       remoteFileId: remote.fileId, isConflicted: false,
-    }, remote.lastModified));
+    }, mtime));
     this.deps.mergeBase.record(path, new TextDecoder().decode(localData));
     void this.deps.logger?.log(`conflict: resolved by prefer-local (remote overwritten) → ${path}`);
   }
@@ -287,7 +287,7 @@ export class ConflictApplier {
       return;
     }
     try {
-      await this.deps.localAdapter.atomicWriteBinary(path, remoteData);
+      await this.deps.localAdapter.atomicWriteBinary(path, remoteData, { ctime: remote.creationTime, mtime: remote.lastModified || undefined });
       if (remote.lastModified) {
         await this.deps.localAdapter.setMtime(path, remote.lastModified);
       }
