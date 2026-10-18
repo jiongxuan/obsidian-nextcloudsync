@@ -107,7 +107,7 @@ export class TransferService {
       remoteFileId: remote.fileId, isConflicted: false,
     }, stat.mtime));
     // The remote now equals the uploaded body, so it is the new merge base.
-    this.deps.mergeBase.record(path, new TextDecoder().decode(data));
+    this.deps.mergeBase.record(path, data);
   }
 
   async downloadFile(
@@ -147,7 +147,7 @@ export class TransferService {
         remoteFileId: remote.fileId, isConflicted: false,
         remoteCtime: remote.creationTime,
       }, remote.lastModified));
-      this.deps.mergeBase.record(remote.path, new TextDecoder().decode(data));
+      this.deps.mergeBase.record(remote.path, data);
       void this.deps.logger?.log(`download: body identical to the local file → state converged, no write → ${remote.path}`);
       return;
     }
@@ -171,7 +171,7 @@ export class TransferService {
       remoteCtime: remote.creationTime,
     }, remote.lastModified));
     // Local now equals the remote body, so it is the new merge base.
-    this.deps.mergeBase.record(remote.path, new TextDecoder().decode(data));
+    this.deps.mergeBase.record(remote.path, data);
   }
 
   // Decided BEFORE any GET from the PROPFIND-advertised size; `maxFileSizeMB` 0 means unlimited. The single

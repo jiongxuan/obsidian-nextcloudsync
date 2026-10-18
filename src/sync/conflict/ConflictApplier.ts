@@ -165,7 +165,7 @@ export class ConflictApplier {
     this.deps.stateDB.setFile(await withLocalSignature(
       this.deps.localAdapter, convergedState(remote, localHash, localStat), remote.lastModified,
     ));
-    this.deps.mergeBase.record(path, new TextDecoder().decode(localData));
+    this.deps.mergeBase.record(path, localData);
     void this.deps.logger?.log(`conflict: content identical to the remote → state converged, no transfer → ${path}`);
     return { converged: true };
   }
@@ -276,7 +276,7 @@ export class ConflictApplier {
       size: stat?.size ?? localData.byteLength, mtime,
       remoteFileId: remote.fileId, isConflicted: false,
     }, mtime));
-    this.deps.mergeBase.record(path, new TextDecoder().decode(localData));
+    this.deps.mergeBase.record(path, localData);
     void this.deps.logger?.log(`conflict: resolved by prefer-local (remote overwritten) → ${path}`);
   }
 
@@ -314,7 +314,7 @@ export class ConflictApplier {
       size: remote.size, mtime,
       remoteFileId: remote.fileId, isConflicted: false,
     }, remote.lastModified));
-    this.deps.mergeBase.record(path, new TextDecoder().decode(remoteData));
+    this.deps.mergeBase.record(path, remoteData);
     void this.deps.logger?.log(`conflict: resolved by prefer-remote (local overwritten) → ${path}`);
   }
 }
