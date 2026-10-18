@@ -120,6 +120,38 @@ export class LocalAdapter {
     }
   }
 
+  private async preserveCreationAfterMtime(path: string, times: FileTimes): Promise<void> {
+    const { ctime, mtime } = times;
+    if (ctime == null || mtime == null || ctime <= mtime) return;
+    const matches = (stat: Awaited<ReturnType<DataAdapter['stat']>>) => stat != null
+      && Math.floor(stat.ctime / 1000) === Math.floor(ctime / 1000)
+      && Math.floor(stat.mtime / 1000) === Math.floor(mtime / 1000);
+    if (matches(await this.adapter.stat(path))) return;
+
+    // Obsidian 1.14.4 applies ctime before mtime. Darwin clamps birthtime when an
+    // earlier mtime is applied afterwards. Use its existing native timestamp
+    // capability to apply creation time last, without rewriting the file again.
+    // These optional implementation capabilities are feature-detected; a future
+    // adapter without them must report failure rather than record false convergence.
+    const native = this.adapter as DataAdapter & {
+      getFullPath?: (path: string) => string;
+      fs?: { setTimes?: (path: string, ctime?: number, mtime?: number) => Promise<void> };
+      btime?: (path: string, ctime: number) => void | Promise<void>;
+    };
+    if (typeof native.getFullPath === 'function') {
+      const fullPath = native.getFullPath(path);
+      if (typeof native.fs?.setTimes === 'function') {
+        await native.fs.setTimes(fullPath, undefined, mtime);
+        await native.fs.setTimes(fullPath, ctime, undefined);
+      } else if (typeof native.btime === 'function') {
+        await native.btime(fullPath, ctime);
+      }
+    }
+    if (!matches(await this.adapter.stat(path))) {
+      throw new Error(`Filesystem did not preserve requested creation/modification time: ${path}`);
+    }
+  }
+
   // An open leaf is updated in place via Vault.modify (no delete event, so Obsidian never detaches it, issue #15);
   // otherwise tmp-write -> remove existing -> rename.
   async atomicWrite(targetPath: string, content: string, times: FileTimes = {}): Promise<void> {
@@ -131,6 +163,7 @@ export class LocalAdapter {
       this.ignore(targetPath);
       if (options.ctime != null || options.mtime != null) await this.vault!.modify(openFile, content, options);
       else await this.vault!.modify(openFile, content);
+      await this.preserveCreationAfterMtime(targetPath, options);
       return;
     }
     const tmpPath = tmpPathFor(targetPath);
@@ -146,6 +179,7 @@ export class LocalAdapter {
         targetRemoved = true;
       }
       await this.adapter.rename(tmpPath, targetPath);
+      await this.preserveCreationAfterMtime(targetPath, options);
     } catch (err) {
       // If remove(targetPath) already succeeded before rename threw, tmpPath is the ONLY surviving copy of the new content:
       // clean up tmp only when the destructive remove() never happened.
@@ -166,6 +200,7 @@ export class LocalAdapter {
       this.ignore(targetPath);
       if (options.ctime != null || options.mtime != null) await this.vault!.modifyBinary(openFile, data, options);
       else await this.vault!.modifyBinary(openFile, data);
+      await this.preserveCreationAfterMtime(targetPath, options);
       return;
     }
     const tmpPath = tmpPathFor(targetPath);
@@ -181,6 +216,7 @@ export class LocalAdapter {
         targetRemoved = true;
       }
       await this.adapter.rename(tmpPath, targetPath);
+      await this.preserveCreationAfterMtime(targetPath, options);
       // Read-back verification (docs/spec.md §9.2): fsync is unavailable through the adapter, so confirm the byte length;
       // a truncated write throws so the caller leaves Base unadvanced and re-syncs.
       const written = await this.adapter.stat(targetPath);
